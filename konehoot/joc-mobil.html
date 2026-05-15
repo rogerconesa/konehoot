@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Konehoot · Juga!</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import {
+  getFirestore, collection, query, orderBy, onSnapshot,
+  doc, getDoc, setDoc, updateDoc, serverTimestamp, increment
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ── CONFIGURA AQUÍ ────────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyDuHxOAU3hiL-8uUYuFyzP-mTyUCTR-wmw",
+  authDomain: "konehoot.firebaseapp.com",
+  projectId: "konehoot",
+  storageBucket: "konehoot.firebasestorage.app",
+  messagingSenderId: "357275257330",
+  appId: "1:357275257330:web:a45bd66abb86a0747e836b"
+};
+// ─────────────────────────────────────────────────────────────────────
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// ── Estat ─────────────────────────────────────────────────────────────
+let nom          = '';
+let preguntes    = [];
+let partida      = {};
+let haRespost    = false;
+let timerInterval = null;
+let tempsRestant  = 0;
+let tempsInici    = 0;
+
+// ── Nom d'usuari ──────────────────────────────────────────────────────
+const LS_NOM = 'konehoot_nom_joc';
+
+function iniciarSeleccioNom() {
+  const nomDesat = localStorage.getItem(LS_NOM);
+  if (nomDesat) {
+    document.getElementById('nom-desat').textContent = nomDesat;
+    document.getElementById('bloc-nom-desat').style.display = 'flex';
+  }
+  mostrarScreen('screen-nom');
+}
+
+window.usarNomDesat = function() {
+  nom = localStorage.getItem(LS_NOM);
+  if (nom) entrarAlJoc();
+};
+
+window.usarNomNou = function() {
+  document.getElementById('bloc-nom-desat').style.display = 'none';
+  document.getElementById('nom-input').focus();
+};
+
+window.confirmarNom = function() {
+  const val = document.getElementById('nom-input').value.trim();
+  if (!val) {
+    document.getElementById('nom-input').classList.add('error');
+    setTimeout(() => document.getElementById('nom-input').classList.remove('error'), 600);
+    return;
+  }
+  nom = val;
+  localStorage.setItem(LS_NOM, nom);
+  entrarAlJoc();
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  iniciarSeleccioNom();
+  document.getElementById('nom-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') window.confirmarNom();
+  });
+});
+
+// ── Entrar al joc ─────────────────────────────────────────────────────
+function entrarAlJoc() {
+  document.getElementById('nom-confirmat').textContent = nom;
+  mostrarScreen('screen-espera');
+  iniciarSubscripcions();
+}
+
+function iniciarSubscripcions() {
+  // Preguntes
+  onSnapshot(query(collection(db, 'preguntes'), orderBy('ordre', 'asc')), snap => {
+    preguntes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  });
+
+  // Estat partida
+  onSnapshot(doc(db, 'partida', 'estat'), snap => {
+    if (!snap.exists()) {
+      mostrarScreen('screen-espera');
+      return;
+    }
+    const nouEstat = snap.data();
+    const canviPregunta = nouEstat.preguntaIndex !== partida.preguntaIndex;
+    partida = nouEstat;
+
+    if (canviPregunta) haRespost = false;
+
+    const fase = partida.fase || 'espera';
+    if (fase === 'espera')        mostrarScreen('screen-espera');
+    else if (fase === 'pregunta') renderPregunta();
+    else if (fase === 'resultats') mostrarResultatsUsuari();
+    else if (fase === 'final')    mostrarFinalUsuari();
+  });
+}
+
+// ── PREGUNTA ──────────────────────────────────────────────────────────
+function renderPregunta() {
+  const idx = partida.preguntaIndex ?? 0;
+  const p   = preguntes[idx];
+  if (!p) return;
+
+  haRespost = false;
+  tempsInici = Date.now();
+
+  if (haRespost) {
+    mostrarEsperant();
+    return;
+  }
+
+  // Reset botons
+  document.querySelectorAll('.resp-btn').forEach(b => {
+    b.classList.remove('seleccionada','correcta','incorrecta','disabled');
+    b.disabled = false;
+  });
+  document.getElementById('mob-num').textContent = `${idx + 1} / ${preguntes.length}`;
+  document.getElementById('mob-autor').textContent = `De: ${p.autor}`;
+  document.getElementById('mob-pregunta').textContent = p.pregunta;
+
+  const lletres = ['A','B','C','D'];
+  p.respostes.forEach((r, i) => {
+    const btn = document.getElementById(`mob-r${i}`);
+    btn.querySelector('.btn-lletra').textContent = lletres[i];
+    btn.querySelector('.btn-text').textContent   = r;
+  });
+
+  mostrarScreen('screen-pregunta');
+
+  // Timer
+  tempsRestant = partida.tempsPregunta || 20;
+  renderTimerMobil();
+  clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    tempsRestant--;
+    renderTimerMobil();
+    if (tempsRestant <= 0) {
+      clearInterval(timerInterval);
+      if (!haRespost) bloquejatSenseResposta();
+    }
+  }, 1000);
+}
+
+function renderTimerMobil() {
+  const el   = document.getElementById('mob-timer-num');
+  const fill = document.getElementById('mob-timer-fill');
+  const total = partida.tempsPregunta || 20;
+  const pct   = tempsRestant / total;
+  el.textContent   = tempsRestant;
+  fill.style.width = (pct * 100) + '%';
+  fill.style.background = tempsRestant > total * 0.4
+    ? 'var(--c2)' : tempsRestant > total * 0.2
+    ? '#ffb800' : 'var(--c3)';
+}
+
+function bloquejatSenseResposta() {
+  document.querySelectorAll('.resp-btn').forEach(b => {
+    b.disabled = true;
+    b.classList.add('disabled');
+  });
+  document.getElementById('mob-status').textContent = 'Temps esgotat!';
+  document.getElementById('mob-status').style.display = 'block';
+}
+
+// ── Respondre ─────────────────────────────────────────────────────────
+window.respondre = async function(idx) {
+  if (haRespost) return;
+  haRespost = true;
+  clearInterval(timerInterval);
+
+  const total = partida.tempsPregunta || 20;
+  const tempsUsat = (Date.now() - tempsInici) / 1000;
+  const tempsRapidesa = Math.max(0, total - tempsUsat);
+  // Puntuació: 1000 base + fins 500 per rapidesa
+  const punts = Math.round(1000 + (tempsRapidesa / total) * 500);
+
+  // Marca el botó
+  document.querySelectorAll('.resp-btn').forEach((b, i) => {
+    b.disabled = true;
+    if (i === idx) b.classList.add('seleccionada');
+    else b.classList.add('disabled');
+  });
+
+  try {
+    // Desa resposta
+    await setDoc(
+      doc(db, 'partida', 'estat', 'respostes', nom),
+      { nom, resposta: idx, punts, timestamp: serverTimestamp() }
+    );
+    // Actualitza puntuació acumulada al jugador
+    await setDoc(
+      doc(db, 'partida', 'jugadors', nom),
+      { nom, punts: increment(punts) },
+      { merge: true }
+    );
+    mostrarEsperant(idx);
+  } catch(e) {
+    console.error(e);
+  }
+};
+
+function mostrarEsperant(idx) {
+  document.getElementById('esperant-lletra').textContent = 'ABCD'[idx ?? 0];
+  mostrarScreen('screen-esperant');
+}
+
+// ── Resultats ─────────────────────────────────────────────────────────
+async function mostrarResultatsUsuari() {
+  clearInterval(timerInterval);
+  const idx = partida.preguntaIndex ?? 0;
+  const p   = preguntes[idx];
+  if (!p) return;
+
+  // Comprova si ha respost correctament
+  try {
+    const resDoc = await getDoc(doc(db, 'partida', 'estat', 'respostes', nom));
+    if (resDoc.exists()) {
+      const resp = resDoc.data();
+      const encertat = resp.resposta === p.correcta;
+      document.getElementById('res-icon').textContent   = encertat ? '🎉' : '😅';
+      document.getElementById('res-titol').textContent  = encertat ? 'Correcte!' : 'Incorrecte';
+      document.getElementById('res-correcta-text').textContent = `La resposta era: ${p.respostes[p.correcta]}`;
+      if (encertat) {
+        document.getElementById('res-punts-wrap').style.display = 'block';
+        document.getElementById('res-punts').textContent = `+${resp.punts}`;
+      } else {
+        document.getElementById('res-punts-wrap').style.display = 'none';
+      }
+    } else {
+      document.getElementById('res-icon').textContent  = '⏱️';
+      document.getElementById('res-titol').textContent = 'No has respost a temps';
+      document.getElementById('res-correcta-text').textContent = `La resposta era: ${p.respostes[p.correcta]}`;
+      document.getElementById('res-punts-wrap').style.display = 'none';
+    }
+  } catch(e) { console.error(e); }
+
+  // Puntuació total
+  try {
+    const jugDoc = await getDoc(doc(db, 'partida', 'jugadors', nom));
+    if (jugDoc.exists()) {
+      document.getElementById('res-total-punts').textContent = `Total: ${jugDoc.data().punts} pts`;
+    }
+  } catch(e) {}
+
+  mostrarScreen('screen-resultats');
+}
+
+// ── Final ─────────────────────────────────────────────────────────────
+async function mostrarFinalUsuari() {
+  clearInterval(timerInterval);
+  try {
+    const jugDoc = await getDoc(doc(db, 'partida', 'jugadors', nom));
+    if (jugDoc.exists()) {
+      document.getElementById('final-punts').textContent = jugDoc.data().punts;
+    }
+  } catch(e) {}
+  document.getElementById('final-nom').textContent = nom;
+  mostrarScreen('screen-final');
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────
+function mostrarScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
+  const el = document.getElementById(id);
+  if (el) el.style.display = 'flex';
+}
+</script>
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:   #0a0a0a;
+  --c1:   #e8f53a;
+  --c2:   #3affa0;
+  --c3:   #fa7dff;
+  --c4:   #3ac8ff;
+  --text: #f0ede6;
+  --muted:#666;
+  --surface: #161616;
+  --border:  #2a2a2a;
+  --font-display: 'Syne', sans-serif;
+  --font-body:    'DM Sans', sans-serif;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Totes les pantalles */
+.screen {
+  display: none;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px 20px;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+}
+
+/* ── NOM ── */
+#screen-nom { gap: 16px; }
+
+.nom-logo {
+  font-family: var(--font-display);
+  font-size: 36px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  text-align: center;
+  margin-bottom: 8px;
+}
+.nom-logo span { color: var(--c1); }
+
+.nom-sub {
+  font-size: 14px;
+  color: var(--muted);
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+/* Bloc nom desat */
+#bloc-nom-desat {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px;
+  width: 100%;
+  text-align: center;
+}
+
+.nom-desat-label { font-size: 12px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; font-family: var(--font-display); }
+
+#nom-desat {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--c1);
+}
+
+.btn-nom-desat {
+  background: var(--c1);
+  color: #0a0a0a;
+  border: none;
+  border-radius: 12px;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  padding: 13px 24px;
+  cursor: pointer;
+  width: 100%;
+  transition: opacity 0.15s;
+}
+.btn-nom-desat:hover { opacity: 0.85; }
+
+.separador {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  color: var(--muted);
+  font-size: 12px;
+}
+.separador::before, .separador::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.nom-form { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+
+input[type="text"] {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  padding: 14px 16px;
+  outline: none;
+  transition: border-color 0.2s;
+  width: 100%;
+  -webkit-appearance: none;
+}
+input[type="text"]:focus { border-color: var(--c1); }
+input[type="text"].error { border-color: var(--c3); animation: shake 0.4s ease; }
+
+.btn-confirmar {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 13px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+.btn-confirmar:hover { border-color: var(--c1); color: var(--c1); }
+
+/* ── ESPERA ── */
+#screen-espera { text-align: center; }
+
+.espera-icon { font-size: 56px; animation: float 3s ease-in-out infinite; }
+
+@keyframes float {
+  0%,100% { transform: translateY(0); }
+  50%      { transform: translateY(-10px); }
+}
+
+.espera-title {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.espera-nom {
+  font-family: var(--font-display);
+  font-size: 18px;
+  color: var(--c1);
+  font-weight: 700;
+}
+
+.espera-hint {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.dots { display: flex; gap: 8px; justify-content: center; }
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--c1);
+  opacity: 0.3;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.dot:nth-child(2) { animation-delay: 0.2s; background: var(--c2); }
+.dot:nth-child(3) { animation-delay: 0.4s; background: var(--c3); }
+
+@keyframes pulse {
+  0%,100% { opacity: 0.2; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.4); }
+}
+
+/* ── PREGUNTA ── */
+#screen-pregunta {
+  justify-content: flex-start;
+  padding-top: 16px;
+  gap: 14px;
+}
+
+.mob-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.mob-num {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.mob-autor {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Timer horitzontal */
+.mob-timer-wrap {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#mob-timer-num {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text);
+  min-width: 28px;
+  text-align: right;
+}
+
+.mob-timer-track {
+  flex: 1;
+  height: 6px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 100px;
+  overflow: hidden;
+}
+
+#mob-timer-fill {
+  height: 100%;
+  background: var(--c2);
+  border-radius: 100px;
+  transition: width 0.9s linear, background 0.5s;
+  width: 100%;
+}
+
+/* Pregunta */
+.mob-pregunta-box {
+  width: 100%;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 16px;
+  padding: 20px;
+  text-align: center;
+}
+
+#mob-pregunta {
+  font-family: var(--font-display);
+  font-size: clamp(16px, 5vw, 22px);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+#mob-status {
+  display: none;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--c3);
+  font-weight: 500;
+}
+
+/* Botons resposta */
+.mob-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  flex: 1;
+}
+
+.resp-btn {
+  border: none;
+  border-radius: 14px;
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: transform 0.12s, opacity 0.15s, filter 0.15s;
+  min-height: 90px;
+  position: relative;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.resp-btn:active:not(:disabled) { transform: scale(0.95); }
+
+.resp-btn:nth-child(1) { background: rgba(232,245,58,0.15);  border: 2px solid rgba(232,245,58,0.4); }
+.resp-btn:nth-child(2) { background: rgba(58,255,160,0.15);  border: 2px solid rgba(58,255,160,0.4); }
+.resp-btn:nth-child(3) { background: rgba(250,125,255,0.15); border: 2px solid rgba(250,125,255,0.4); }
+.resp-btn:nth-child(4) { background: rgba(58,200,255,0.15);  border: 2px solid rgba(58,200,255,0.4); }
+
+.resp-btn.disabled {
+  opacity: 0.25;
+  pointer-events: none;
+}
+
+.resp-btn.seleccionada {
+  transform: scale(1.04);
+  filter: brightness(1.3);
+  box-shadow: 0 0 24px rgba(232,245,58,0.2);
+}
+
+.resp-btn:nth-child(1).seleccionada { box-shadow: 0 0 24px rgba(232,245,58,0.35); }
+.resp-btn:nth-child(2).seleccionada { box-shadow: 0 0 24px rgba(58,255,160,0.35); }
+.resp-btn:nth-child(3).seleccionada { box-shadow: 0 0 24px rgba(250,125,255,0.35); }
+.resp-btn:nth-child(4).seleccionada { box-shadow: 0 0 24px rgba(58,200,255,0.35); }
+
+.btn-lletra {
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 800;
+  color: #0a0a0a;
+  flex-shrink: 0;
+}
+
+.resp-btn:nth-child(1) .btn-lletra { background: var(--c1); }
+.resp-btn:nth-child(2) .btn-lletra { background: var(--c2); }
+.resp-btn:nth-child(3) .btn-lletra { background: var(--c3); }
+.resp-btn:nth-child(4) .btn-lletra { background: var(--c4); }
+
+.btn-text {
+  font-family: var(--font-display);
+  font-size: clamp(12px, 3.5vw, 15px);
+  font-weight: 700;
+  text-align: center;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+/* ── ESPERANT ── */
+#screen-esperant { text-align: center; gap: 16px; }
+
+.esperant-badge {
+  width: 90px; height: 90px;
+  border-radius: 50%;
+  background: rgba(232,245,58,0.1);
+  border: 2px solid var(--c1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 36px;
+  font-weight: 800;
+  color: var(--c1);
+  animation: popIn 0.4s cubic-bezier(0.34,1.56,0.64,1);
+}
+
+@keyframes popIn {
+  from { transform: scale(0.5); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+.esperant-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+}
+.esperant-hint { font-size: 13px; color: var(--muted); }
+
+/* ── RESULTATS ── */
+#screen-resultats { text-align: center; gap: 20px; }
+
+.res-icon { font-size: 56px; animation: popIn 0.4s cubic-bezier(0.34,1.56,0.64,1); }
+
+.res-titol {
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 800;
+}
+
+.res-correcta-text {
+  font-size: 14px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 16px;
+  width: 100%;
+  text-align: left;
+  line-height: 1.4;
+}
+
+#res-punts-wrap {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+#res-punts {
+  font-family: var(--font-display);
+  font-size: 42px;
+  font-weight: 800;
+  color: var(--c2);
+}
+
+.res-punts-label { font-size: 12px; color: var(--muted); }
+
+#res-total-punts {
+  font-size: 14px;
+  color: var(--muted);
+  font-family: var(--font-display);
+}
+
+.esperant-seguent {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.dots-sm { display: flex; gap: 6px; justify-content: center; }
+.dots-sm .dot { width: 6px; height: 6px; }
+
+/* ── FINAL ── */
+#screen-final { text-align: center; gap: 16px; }
+
+.final-congrats { font-size: 48px; animation: float 3s ease-in-out infinite; }
+
+.final-title {
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+.final-title span { color: var(--c1); }
+
+.final-nom-title {
+  font-size: 14px;
+  color: var(--muted);
+}
+#final-nom { color: var(--text); font-weight: 500; }
+
+.final-punts-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 24px 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.final-punts-label { font-size: 12px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; font-family: var(--font-display); }
+
+#final-punts {
+  font-family: var(--font-display);
+  font-size: 52px;
+  font-weight: 800;
+  color: var(--c1);
+}
+
+.final-hint { font-size: 13px; color: var(--muted); }
+
+/* Animacions */
+@keyframes shake {
+  0%,100% { transform: translateX(0); }
+  25% { transform: translateX(-6px); }
+  75% { transform: translateX(6px); }
+}
+
+@keyframes float {
+  0%,100% { transform: translateY(0); }
+  50%      { transform: translateY(-8px); }
+}
+</style>
+</head>
+<body>
+
+<!-- NOM -->
+<div class="screen" id="screen-nom" style="display:flex">
+  <div class="nom-logo">Kone<span>hoot</span></div>
+  <div class="nom-sub">Com et diuen al grup?</div>
+
+  <div id="bloc-nom-desat">
+    <div class="nom-desat-label">Hola de nou!</div>
+    <div id="nom-desat">Nom</div>
+    <button class="btn-nom-desat" onclick="usarNomDesat()">Soc jo, entrar →</button>
+  </div>
+
+  <div class="separador">o entra amb un nom diferent</div>
+
+  <div class="nom-form">
+    <input type="text" id="nom-input" placeholder="El teu nom al grup" maxlength="20" autocomplete="off" autocorrect="off" spellcheck="false">
+    <button class="btn-confirmar" onclick="confirmarNom()">Entrar al joc →</button>
+  </div>
+</div>
+
+<!-- ESPERA -->
+<div class="screen" id="screen-espera">
+  <div class="espera-icon">🎮</div>
+  <div class="espera-title">Estàs a punt!</div>
+  <div class="espera-nom" id="nom-confirmat"></div>
+  <div class="espera-hint">Espera que l'admin<br>iniciï el joc</div>
+  <div class="dots">
+    <div class="dot"></div>
+    <div class="dot"></div>
+    <div class="dot"></div>
+  </div>
+</div>
+
+<!-- PREGUNTA -->
+<div class="screen" id="screen-pregunta">
+  <div class="mob-topbar">
+    <div class="mob-num" id="mob-num">1 / 10</div>
+    <div class="mob-autor" id="mob-autor"></div>
+  </div>
+
+  <div class="mob-timer-wrap">
+    <div id="mob-timer-num">20</div>
+    <div class="mob-timer-track">
+      <div id="mob-timer-fill"></div>
+    </div>
+  </div>
+
+  <div class="mob-pregunta-box">
+    <div id="mob-pregunta"></div>
+    <div id="mob-status"></div>
+  </div>
+
+  <div class="mob-grid">
+    <button class="resp-btn" id="mob-r0" onclick="respondre(0)">
+      <span class="btn-lletra">A</span>
+      <span class="btn-text"></span>
+    </button>
+    <button class="resp-btn" id="mob-r1" onclick="respondre(1)">
+      <span class="btn-lletra">B</span>
+      <span class="btn-text"></span>
+    </button>
+    <button class="resp-btn" id="mob-r2" onclick="respondre(2)">
+      <span class="btn-lletra">C</span>
+      <span class="btn-text"></span>
+    </button>
+    <button class="resp-btn" id="mob-r3" onclick="respondre(3)">
+      <span class="btn-lletra">D</span>
+      <span class="btn-text"></span>
+    </button>
+  </div>
+</div>
+
+<!-- ESPERANT RESULTATS -->
+<div class="screen" id="screen-esperant">
+  <div class="esperant-badge" id="esperant-lletra">A</div>
+  <div class="esperant-title">Resposta enviada!</div>
+  <div class="esperant-hint">Espera que l'admin mostri els resultats</div>
+  <div class="dots-sm">
+    <div class="dot"></div>
+    <div class="dot"></div>
+    <div class="dot"></div>
+  </div>
+</div>
+
+<!-- RESULTATS -->
+<div class="screen" id="screen-resultats">
+  <div class="res-icon" id="res-icon">🎉</div>
+  <div class="res-titol" id="res-titol">Correcte!</div>
+  <div class="res-correcta-text" id="res-correcta-text"></div>
+  <div id="res-punts-wrap">
+    <div id="res-punts">+1000</div>
+    <div class="res-punts-label">punts guanyats</div>
+  </div>
+  <div id="res-total-punts"></div>
+  <div class="esperant-seguent">Espera la següent pregunta…</div>
+  <div class="dots-sm dots">
+    <div class="dot"></div>
+    <div class="dot"></div>
+    <div class="dot"></div>
+  </div>
+</div>
+
+<!-- FINAL -->
+<div class="screen" id="screen-final">
+  <div class="final-congrats">🏆</div>
+  <div class="final-title">Joc acabat!<br><span>Gràcies!</span></div>
+  <div class="final-nom-title">Has jugat com a <span id="final-nom"></span></div>
+  <div class="final-punts-box">
+    <div class="final-punts-label">Puntuació final</div>
+    <div id="final-punts">0</div>
+  </div>
+  <div class="final-hint">Mira la pantalla gran per veure el rànquing!</div>
+</div>
+
+</body>
+</html>

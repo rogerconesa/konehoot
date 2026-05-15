@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Konehoot · Pantalla</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import {
+  getFirestore, collection, query, orderBy, onSnapshot,
+  doc, getDoc, setDoc, updateDoc, serverTimestamp, writeBatch
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ── CONFIGURA AQUÍ ────────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyDuHxOAU3hiL-8uUYuFyzP-mTyUCTR-wmw",
+  authDomain: "konehoot.firebaseapp.com",
+  projectId: "konehoot",
+  storageBucket: "konehoot.firebasestorage.app",
+  messagingSenderId: "357275257330",
+  appId: "1:357275257330:web:a45bd66abb86a0747e836b"
+};
+const ADMIN_PASSWORD = "konehoot2025";
+// ─────────────────────────────────────────────────────────────────────
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// ── Estat ─────────────────────────────────────────────────────────────
+let preguntes    = [];
+let partida      = {};
+let timerInterval = null;
+let tempsRestant  = 0;
+let respostesSnap = null;
+
+// ── Login ─────────────────────────────────────────────────────────────
+function login() {
+  const pw = document.getElementById('pw').value;
+  if (pw === ADMIN_PASSWORD) {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('joc').style.display = 'block';
+    iniciarJoc();
+  } else {
+    document.getElementById('login-err').style.display = 'block';
+    document.getElementById('pw').value = '';
+  }
+}
+window.login = login;
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('pw').focus();
+  document.getElementById('pw').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+});
+
+// ── Iniciar subscripcions ─────────────────────────────────────────────
+function iniciarJoc() {
+  // Preguntes del joc
+  onSnapshot(query(collection(db, 'preguntes'), orderBy('ordre', 'asc')), snap => {
+    preguntes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  });
+
+  // Estat partida
+  onSnapshot(doc(db, 'partida', 'estat'), snap => {
+    if (!snap.exists()) {
+      mostrarEspera();
+      return;
+    }
+    partida = snap.data();
+    renderEstat();
+  });
+}
+
+// ── Render principal ──────────────────────────────────────────────────
+function renderEstat() {
+  const fase = partida.fase || 'espera';
+  ocultarTot();
+
+  if (fase === 'espera')       mostrarEspera();
+  else if (fase === 'pregunta') mostrarPregunta();
+  else if (fase === 'resultats') mostrarResultats();
+  else if (fase === 'final')    mostrarFinal();
+}
+
+function ocultarTot() {
+  ['screen-espera','screen-pregunta','screen-resultats','screen-final'].forEach(id => {
+    document.getElementById(id).style.display = 'none';
+  });
+  clearInterval(timerInterval);
+}
+
+// ── PANTALLA ESPERA ───────────────────────────────────────────────────
+function mostrarEspera() {
+  document.getElementById('screen-espera').style.display = 'flex';
+  document.getElementById('espera-total').textContent = preguntes.length;
+}
+
+// ── PANTALLA PREGUNTA ─────────────────────────────────────────────────
+function mostrarPregunta() {
+  const screen = document.getElementById('screen-pregunta');
+  screen.style.display = 'flex';
+
+  const idx = partida.preguntaIndex ?? 0;
+  const p   = preguntes[idx];
+  if (!p) return;
+
+  document.getElementById('pq-numero').textContent = `${idx + 1} / ${preguntes.length}`;
+  document.getElementById('pq-autor').textContent  = p.autor;
+  document.getElementById('pq-text').textContent   = p.pregunta;
+
+  const colors = ['--c1','--c2','--c3','--c4'];
+  const lletres = ['A','B','C','D'];
+  p.respostes.forEach((r, i) => {
+    document.getElementById(`pq-resp-${i}`).querySelector('.resp-text').textContent = r;
+    document.getElementById(`pq-resp-${i}`).querySelector('.resp-lletra').textContent = lletres[i];
+    document.getElementById(`pq-resp-${i}`).classList.remove('revelada','correcta','incorrecta');
+  });
+
+  // Comptador de respostes en temps real
+  if (respostesSnap) respostesSnap(); // unsub anterior
+  respostesSnap = onSnapshot(
+    collection(db, 'partida', 'estat', 'respostes'),
+    snap => {
+      document.getElementById('pq-respostes-cnt').textContent = snap.size;
+    }
+  );
+
+  // Timer
+  tempsRestant = partida.tempsPregunta || 20;
+  renderTimer();
+  clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    tempsRestant--;
+    renderTimer();
+    if (tempsRestant <= 0) clearInterval(timerInterval);
+  }, 1000);
+}
+
+function renderTimer() {
+  const el  = document.getElementById('pq-timer');
+  const arc = document.getElementById('timer-arc');
+  const total = partida.tempsPregunta || 20;
+  const pct   = tempsRestant / total;
+  const r = 44;
+  const circ = 2 * Math.PI * r;
+  arc.style.strokeDashoffset = circ * (1 - pct);
+  el.textContent = tempsRestant;
+  arc.style.stroke = tempsRestant > total * 0.4 ? 'var(--c2)' : tempsRestant > total * 0.2 ? '#ffb800' : 'var(--c3)';
+}
+
+// ── PANTALLA RESULTATS ────────────────────────────────────────────────
+async function mostrarResultats() {
+  const screen = document.getElementById('screen-resultats');
+  screen.style.display = 'flex';
+  if (respostesSnap) { respostesSnap(); respostesSnap = null; }
+
+  const idx = partida.preguntaIndex ?? 0;
+  const p   = preguntes[idx];
+  if (!p) return;
+
+  document.getElementById('res-numero').textContent = `Pregunta ${idx + 1} de ${preguntes.length}`;
+  document.getElementById('res-text').textContent   = p.pregunta;
+  document.getElementById('res-autor').textContent  = p.autor;
+
+  // Llegir respostes
+  const resSnap = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js")
+    .then(m => m.getDocs(collection(db, 'partida', 'estat', 'respostes')));
+
+  const comptes = [0,0,0,0];
+  resSnap.forEach(d => {
+    const v = d.data().resposta;
+    if (v >= 0 && v <= 3) comptes[v]++;
+  });
+  const total = comptes.reduce((a,b) => a+b, 0);
+  const lletres = ['A','B','C','D'];
+
+  p.respostes.forEach((r, i) => {
+    const el    = document.getElementById(`res-resp-${i}`);
+    const bar   = el.querySelector('.res-bar-fill');
+    const label = el.querySelector('.res-label');
+    const pct   = total > 0 ? Math.round(comptes[i]/total*100) : 0;
+    bar.style.width = pct + '%';
+    label.textContent = `${lletres[i]}. ${r}  —  ${comptes[i]} vot${comptes[i]!==1?'s':''}`;
+    el.classList.toggle('correcta', i === p.correcta);
+    el.classList.toggle('incorrecta', i !== p.correcta);
+  });
+
+  // Rànquing top 5
+  const jugadors = {};
+  resSnap.forEach(d => {
+    const dat = d.data();
+    const nom = dat.nom || d.id;
+    if (!jugadors[nom]) jugadors[nom] = { nom, punts: 0 };
+    if (dat.resposta === p.correcta) jugadors[nom].punts += dat.punts || 0;
+  });
+
+  // Puntuació acumulada de Firestore
+  const rankSnap = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js")
+    .then(m => m.getDocs(collection(db, 'partida', 'jugadors')));
+
+  const rank = [];
+  rankSnap.forEach(d => rank.push({ nom: d.id, ...d.data() }));
+  rank.sort((a,b) => b.punts - a.punts);
+
+  const rankEl = document.getElementById('res-ranking');
+  rankEl.innerHTML = rank.slice(0,5).map((j, i) => `
+    <div class="rank-row">
+      <span class="rank-pos">${['🥇','🥈','🥉','4','5'][i]}</span>
+      <span class="rank-nom">${esc(j.nom)}</span>
+      <span class="rank-punts">${j.punts} pts</span>
+    </div>
+  `).join('') || '<div style="opacity:.4;font-size:14px">Cap resposta registrada</div>';
+}
+
+// ── PANTALLA FINAL ────────────────────────────────────────────────────
+async function mostrarFinal() {
+  document.getElementById('screen-final').style.display = 'flex';
+
+  const rankSnap = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js")
+    .then(m => m.getDocs(collection(db, 'partida', 'jugadors')));
+
+  const rank = [];
+  rankSnap.forEach(d => rank.push({ nom: d.id, ...d.data() }));
+  rank.sort((a,b) => b.punts - a.punts);
+
+  const medalles = ['🥇','🥈','🥉'];
+  document.getElementById('final-ranking').innerHTML = rank.map((j, i) => `
+    <div class="final-row" style="animation-delay:${i*0.1}s">
+      <span class="final-pos">${medalles[i] || (i+1)}</span>
+      <span class="final-nom">${esc(j.nom)}</span>
+      <span class="final-punts">${j.punts}<small> pts</small></span>
+    </div>
+  `).join('');
+}
+
+// ── CONTROLS ADMIN (botons de la pantalla) ────────────────────────────
+window.iniciarPartida = async function() {
+  if (!preguntes.length) { alert('No hi ha preguntes al joc!'); return; }
+  // Esborra jugadors i respostes anteriors
+  const batch = (await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js")).writeBatch(db);
+  await setDoc(doc(db, 'partida', 'estat'), {
+    fase: 'pregunta',
+    preguntaIndex: 0,
+    tempsPregunta: 20,
+    iniciatAt: serverTimestamp()
+  });
+};
+
+window.seguentPregunta = async function() {
+  const idx = (partida.preguntaIndex ?? 0) + 1;
+  if (idx >= preguntes.length) {
+    await updateDoc(doc(db, 'partida', 'estat'), { fase: 'final' });
+  } else {
+    // Esborra respostes de la ronda anterior
+    const { getDocs, deleteDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+    const rSnap = await getDocs(collection(db, 'partida', 'estat', 'respostes'));
+    const batch = writeBatch(db);
+    rSnap.forEach(d => batch.delete(d.ref));
+    batch.update(doc(db, 'partida', 'estat'), { fase: 'pregunta', preguntaIndex: idx });
+    await batch.commit();
+  }
+};
+
+window.mostrarResultatsAdmin = async function() {
+  await updateDoc(doc(db, 'partida', 'estat'), { fase: 'resultats' });
+};
+
+window.resetJoc = async function() {
+  if (!confirm('Reiniciar tot el joc?')) return;
+  const { getDocs, deleteDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+  const batch = writeBatch(db);
+  const rSnap = await getDocs(collection(db, 'partida', 'estat', 'respostes'));
+  rSnap.forEach(d => batch.delete(d.ref));
+  const jSnap = await getDocs(collection(db, 'partida', 'jugadors'));
+  jSnap.forEach(d => batch.delete(d.ref));
+  batch.set(doc(db, 'partida', 'estat'), { fase: 'espera' });
+  await batch.commit();
+};
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:   #0a0a0a;
+  --c1:   #e8f53a;
+  --c2:   #3affa0;
+  --c3:   #fa7dff;
+  --c4:   #3ac8ff;
+  --text: #f0ede6;
+  --muted:#666;
+  --font-display: 'Syne', sans-serif;
+  --font-body:    'DM Sans', sans-serif;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+/* ── LOGIN ── */
+#login-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-box {
+  text-align: center;
+}
+
+.login-box h1 {
+  font-family: var(--font-display);
+  font-size: 52px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 8px;
+}
+.login-box h1 span { color: var(--c1); }
+.login-box p { color: var(--muted); margin-bottom: 28px; font-size: 14px; }
+
+.login-box input {
+  background: #161616;
+  border: 1.5px solid #2a2a2a;
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  padding: 14px 20px;
+  outline: none;
+  width: 280px;
+  text-align: center;
+  letter-spacing: 0.1em;
+  display: block;
+  margin: 0 auto 12px;
+  transition: border-color 0.2s;
+}
+
+.login-box input:focus { border-color: var(--c1); }
+
+#login-err { display: none; color: #ff5c5c; font-size: 13px; margin-bottom: 12px; }
+
+.login-box button {
+  background: var(--c1);
+  color: #0a0a0a;
+  border: none;
+  border-radius: 12px;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  padding: 14px 36px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.login-box button:hover { opacity: 0.85; }
+
+/* ── JOC ── */
+#joc { display: none; width: 100vw; height: 100vh; position: relative; }
+
+/* Controls admin (discrets, cantonada inferior) */
+.admin-controls {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  gap: 8px;
+  z-index: 50;
+}
+
+.ctrl-btn {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.6);
+  border-radius: 10px;
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 9px 16px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  backdrop-filter: blur(8px);
+}
+.ctrl-btn:hover { background: rgba(255,255,255,0.15); color: #fff; }
+.ctrl-btn.primary { background: var(--c1); color: #0a0a0a; border-color: var(--c1); }
+.ctrl-btn.primary:hover { opacity: 0.85; }
+.ctrl-btn.danger { background: rgba(255,92,92,0.15); border-color: rgba(255,92,92,0.3); color: #ff5c5c; }
+
+/* ── PANTALLA ESPERA ── */
+#screen-espera {
+  display: none;
+  width: 100%;
+  height: 100vh;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 24px;
+  background: radial-gradient(ellipse at 50% 0%, rgba(232,245,58,0.06) 0%, transparent 70%);
+}
+
+.espera-logo {
+  font-family: var(--font-display);
+  font-size: clamp(60px, 10vw, 100px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.espera-logo span { color: var(--c1); }
+
+.espera-sub {
+  font-size: clamp(16px, 2.5vw, 22px);
+  color: var(--muted);
+  font-weight: 300;
+}
+
+.espera-url {
+  font-family: var(--font-display);
+  font-size: clamp(14px, 2vw, 18px);
+  color: var(--c2);
+  background: rgba(58,255,160,0.08);
+  border: 1px solid rgba(58,255,160,0.2);
+  padding: 12px 28px;
+  border-radius: 100px;
+  letter-spacing: 0.04em;
+}
+
+.espera-stats {
+  font-size: 14px;
+  color: var(--muted);
+}
+.espera-stats strong { color: var(--text); }
+
+/* Dots animats */
+.dots { display: flex; gap: 8px; justify-content: center; margin-top: 8px; }
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--c1);
+  opacity: 0.3;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.dot:nth-child(2) { animation-delay: 0.2s; background: var(--c2); }
+.dot:nth-child(3) { animation-delay: 0.4s; background: var(--c3); }
+
+@keyframes pulse {
+  0%,100% { opacity: 0.2; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.4); }
+}
+
+/* ── PANTALLA PREGUNTA ── */
+#screen-pregunta {
+  display: none;
+  width: 100%;
+  height: 100vh;
+  flex-direction: column;
+  padding: 32px;
+  gap: 24px;
+}
+
+.pq-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pq-numero {
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pq-autor-pill {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 100px;
+  padding: 5px 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.pq-autor-pill strong { color: var(--text); font-weight: 500; }
+
+/* Timer SVG */
+.timer-wrap {
+  position: relative;
+  width: 80px; height: 80px;
+  flex-shrink: 0;
+}
+
+.timer-wrap svg { transform: rotate(-90deg); }
+
+#timer-track {
+  fill: none;
+  stroke: rgba(255,255,255,0.08);
+  stroke-width: 5;
+}
+
+#timer-arc {
+  fill: none;
+  stroke: var(--c2);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-dasharray: 276.46;
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 0.9s linear, stroke 0.5s;
+}
+
+#pq-timer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+/* Pregunta box */
+.pq-box {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 20px;
+  padding: 32px 40px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.pq-text {
+  font-family: var(--font-display);
+  font-size: clamp(22px, 3.5vw, 42px);
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.pq-respostes-cnt {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.pq-respostes-cnt strong { color: var(--c2); }
+
+/* Grid respostes */
+.pq-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  flex: 1;
+}
+
+.pq-resp {
+  border-radius: 16px;
+  padding: 20px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-family: var(--font-display);
+  font-size: clamp(16px, 2.2vw, 28px);
+  font-weight: 700;
+  transition: transform 0.2s;
+  overflow: hidden;
+}
+
+.pq-resp:nth-child(1) { background: rgba(232,245,58,0.12);  border: 2px solid rgba(232,245,58,0.3); }
+.pq-resp:nth-child(2) { background: rgba(58,255,160,0.12);  border: 2px solid rgba(58,255,160,0.3); }
+.pq-resp:nth-child(3) { background: rgba(250,125,255,0.12); border: 2px solid rgba(250,125,255,0.3); }
+.pq-resp:nth-child(4) { background: rgba(58,200,255,0.12);  border: 2px solid rgba(58,200,255,0.3); }
+
+.resp-lletra {
+  width: 44px; height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.pq-resp:nth-child(1) .resp-lletra { background: var(--c1); color: #0a0a0a; }
+.pq-resp:nth-child(2) .resp-lletra { background: var(--c2); color: #0a0a0a; }
+.pq-resp:nth-child(3) .resp-lletra { background: var(--c3); color: #0a0a0a; }
+.pq-resp:nth-child(4) .resp-lletra { background: var(--c4); color: #0a0a0a; }
+
+.resp-text { flex: 1; line-height: 1.2; }
+
+/* ── PANTALLA RESULTATS ── */
+#screen-resultats {
+  display: none;
+  width: 100%;
+  height: 100vh;
+  flex-direction: row;
+  gap: 0;
+}
+
+.res-left {
+  flex: 1.4;
+  display: flex;
+  flex-direction: column;
+  padding: 40px;
+  gap: 20px;
+  border-right: 1px solid rgba(255,255,255,0.06);
+}
+
+.res-right {
+  width: 320px;
+  padding: 40px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.res-label-top {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.res-pregunta-text {
+  font-family: var(--font-display);
+  font-size: clamp(20px, 3vw, 36px);
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.res-autor-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  background: rgba(255,255,255,0.05);
+  border-radius: 100px;
+  padding: 4px 12px;
+  align-self: flex-start;
+}
+
+/* Barres de resultats */
+.res-barres { display: flex; flex-direction: column; gap: 10px; flex: 1; justify-content: center; }
+
+.res-resp-bar {
+  border-radius: 12px;
+  padding: 14px 18px;
+  position: relative;
+  overflow: hidden;
+  border: 1.5px solid rgba(255,255,255,0.06);
+  transition: border-color 0.3s;
+}
+
+.res-resp-bar.correcta { border-color: var(--c2); background: rgba(58,255,160,0.08); }
+.res-resp-bar.incorrecta { opacity: 0.5; }
+
+.res-bar-fill {
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,0.04);
+  border-radius: 12px;
+  transition: width 0.8s cubic-bezier(0.34,1.1,0.64,1);
+  width: 0%;
+}
+
+.res-resp-bar.correcta .res-bar-fill { background: rgba(58,255,160,0.15); }
+
+.res-label {
+  position: relative;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  z-index: 1;
+}
+
+.res-resp-bar.correcta .res-label { color: var(--c2); }
+
+/* Rànquing lateral */
+.rank-title {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.rank-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+.rank-pos { font-size: 18px; width: 28px; text-align: center; }
+.rank-nom { flex: 1; font-family: var(--font-display); font-size: 14px; font-weight: 600; }
+.rank-punts { font-size: 13px; color: var(--c1); font-weight: 700; font-family: var(--font-display); }
+
+/* ── PANTALLA FINAL ── */
+#screen-final {
+  display: none;
+  width: 100%;
+  height: 100vh;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 32px;
+  background: radial-gradient(ellipse at 50% 20%, rgba(232,245,58,0.08) 0%, transparent 65%);
+}
+
+.final-title {
+  font-family: var(--font-display);
+  font-size: clamp(40px, 7vw, 80px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.final-title span { color: var(--c1); }
+
+#final-ranking {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 500px;
+}
+
+.final-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 16px;
+  padding: 16px 24px;
+  animation: slideIn 0.4s ease both;
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.final-pos { font-size: 28px; width: 36px; }
+.final-nom { flex: 1; font-family: var(--font-display); font-size: 20px; font-weight: 700; text-align: left; }
+.final-punts { font-family: var(--font-display); font-size: 24px; font-weight: 800; color: var(--c1); }
+.final-punts small { font-size: 14px; opacity: 0.6; margin-left: 4px; }
+
+/* Confetti placeholder */
+.confetti-wrap {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login-screen">
+  <div class="login-box">
+    <h1>Kone<span>hoot</span></h1>
+    <p>Pantalla de joc · Accés admin</p>
+    <div id="login-err">Contrasenya incorrecta</div>
+    <input type="password" id="pw" placeholder="Contrasenya admin">
+    <button onclick="login()">Iniciar pantalla →</button>
+  </div>
+</div>
+
+<!-- JOC -->
+<div id="joc">
+
+  <!-- ESPERA -->
+  <div id="screen-espera" style="display:flex">
+    <div class="espera-logo">Kone<span>hoot</span></div>
+    <div class="espera-sub">El joc està a punt</div>
+    <div class="espera-url">Entra a: <strong>konehoot.pages.dev</strong></div>
+    <div class="espera-stats">
+      <strong id="espera-total">0</strong> preguntes preparades
+    </div>
+    <div class="dots">
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+    </div>
+  </div>
+
+  <!-- PREGUNTA -->
+  <div id="screen-pregunta">
+    <div class="pq-topbar">
+      <div class="pq-numero" id="pq-numero">1 / 10</div>
+      <div class="pq-autor-pill">Pregunta de <strong id="pq-autor"></strong></div>
+      <div class="timer-wrap">
+        <svg width="80" height="80" viewBox="0 0 100 100">
+          <circle id="timer-track" cx="50" cy="50" r="44"/>
+          <circle id="timer-arc"   cx="50" cy="50" r="44"/>
+        </svg>
+        <div id="pq-timer">20</div>
+      </div>
+    </div>
+
+    <div class="pq-box">
+      <div class="pq-text" id="pq-text"></div>
+      <div class="pq-respostes-cnt">
+        <strong id="pq-respostes-cnt">0</strong> respostes rebudes
+      </div>
+    </div>
+
+    <div class="pq-grid">
+      <div class="pq-resp" id="pq-resp-0"><span class="resp-lletra">A</span><span class="resp-text"></span></div>
+      <div class="pq-resp" id="pq-resp-1"><span class="resp-lletra">B</span><span class="resp-text"></span></div>
+      <div class="pq-resp" id="pq-resp-2"><span class="resp-lletra">C</span><span class="resp-text"></span></div>
+      <div class="pq-resp" id="pq-resp-3"><span class="resp-lletra">D</span><span class="resp-text"></span></div>
+    </div>
+  </div>
+
+  <!-- RESULTATS -->
+  <div id="screen-resultats">
+    <div class="res-left">
+      <div class="res-label-top" id="res-numero">Pregunta 1 de 10</div>
+      <div class="res-pregunta-text" id="res-text"></div>
+      <div class="res-autor-pill">✎ <span id="res-autor"></span></div>
+      <div class="res-barres">
+        <div class="res-resp-bar" id="res-resp-0"><div class="res-bar-fill"></div><div class="res-label"></div></div>
+        <div class="res-resp-bar" id="res-resp-1"><div class="res-bar-fill"></div><div class="res-label"></div></div>
+        <div class="res-resp-bar" id="res-resp-2"><div class="res-bar-fill"></div><div class="res-label"></div></div>
+        <div class="res-resp-bar" id="res-resp-3"><div class="res-bar-fill"></div><div class="res-label"></div></div>
+      </div>
+    </div>
+    <div class="res-right">
+      <div class="rank-title">Rànquing</div>
+      <div id="res-ranking"></div>
+    </div>
+  </div>
+
+  <!-- FINAL -->
+  <div id="screen-final">
+    <div class="final-title">Fi del<br><span>Konehoot!</span></div>
+    <div id="final-ranking"></div>
+  </div>
+
+  <!-- Controls admin -->
+  <div class="admin-controls">
+    <button class="ctrl-btn danger" onclick="resetJoc()">↺ Reset</button>
+    <button class="ctrl-btn" onclick="mostrarResultatsAdmin()" id="btn-resultats">Mostrar resultats</button>
+    <button class="ctrl-btn primary" onclick="iniciarPartida()" id="btn-iniciar">▶ Iniciar joc</button>
+    <button class="ctrl-btn primary" onclick="seguentPregunta()" id="btn-seguent" style="display:none">Següent →</button>
+  </div>
+
+</div>
+
+<script>
+// Actualitza botons admin segons la fase
+const observer = new MutationObserver(() => {
+  const fase = document.getElementById('screen-pregunta').style.display !== 'none' ? 'pregunta'
+             : document.getElementById('screen-resultats').style.display !== 'none' ? 'resultats'
+             : document.getElementById('screen-final').style.display !== 'none' ? 'final'
+             : 'espera';
+  document.getElementById('btn-iniciar').style.display  = fase === 'espera'    ? '' : 'none';
+  document.getElementById('btn-resultats').style.display = fase === 'pregunta'  ? '' : 'none';
+  document.getElementById('btn-seguent').style.display   = fase === 'resultats' ? '' : 'none';
+});
+observer.observe(document.getElementById('joc'), { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+</script>
+
+</body>
+</html>
